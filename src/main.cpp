@@ -3,12 +3,15 @@
 #include <Arduino.h>
 #include <DMD32.h>
 #include "fonts/SystemFont5x7.h"
-#include "fonts/Arial_Black_16_ISO_8859_1.h"
+#include "fonts/Arial_black_16.h"
 #include <EEPROM.h>
 #include <Ds1302.h>
 #include "BluetoothSerial.h"
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+#if !defined(CONFIG_BT_SPP_ENABLED)
+#error Serial Bluetooth not available or not enabled. It is only available for the ESP32 chip.
 #endif
 
 //Constants
@@ -23,7 +26,7 @@
 //Global Vars
 String run_text, onair_text, running_text;
 unsigned int txt_brightness, txt_speed, timer_, end_time, end_time_second, start_time = 0;
-bool is_timer = false, is_finished = false;
+bool is_timer = false, is_tiner = false, is_finished = false, confirmRequestPending = true;;
 char onair_txt[24], clock_buffer[13];
 
 //Classic Bluetooth
@@ -103,6 +106,53 @@ uint8_t parseDigits(char* str, uint8_t count)
     return val;
 }
 
+void setBrightness()
+{
+  //control the brightness of LED
+  ledcSetup(CHANNEL, FREQ, RESOLUTION); 
+  //attach the channel to the GPIO to be controlled
+  ledcAttachPin(PIN_DMD_nOE, CHANNEL);
+  ledcWrite(CHANNEL, txt_brightness);
+}
+
+void IRAM_ATTR triggerScan()
+{
+  dmd.scanDisplayBySPI();
+  setBrightness();
+}
+
+void initTimer()
+{
+  //return the clock speed of the CPU
+  uint8_t cpuClock = ESP.getCpuFreqMHz();  
+  //display timer
+  disp_timer = timerBegin(1, cpuClock, true);
+  timerAttachInterrupt(disp_timer, &triggerScan, true);
+  timerAlarmWrite(disp_timer, TIMER_MS, true);
+  // start an alarm 
+  timerAlarmEnable(disp_timer);
+}
+
+void BTConfirmRequestCallback(uint32_t numVal)
+{
+  confirmRequestPending = true;
+  timerDetachInterrupt(disp_timer);
+  delay(6);
+}
+
+void BTAuthCompleteCallback(boolean success)
+{
+  confirmRequestPending = false;
+  if(success)
+  {
+    initTimer();
+  }
+  else
+  {
+    initTimer();
+  }
+}
+
 void EEPROM_put(char add, String data)
 {
   int _size = data.length();
@@ -112,7 +162,10 @@ void EEPROM_put(char add, String data)
     EEPROM.write(add + i, data[i]);
   }
   EEPROM.write(add + _size, '\0'); //Add termination null character for String Data
+  timerDetachInterrupt(disp_timer);
+  delay(6);
   EEPROM.commit();
+  initTimer();
 }
 
 void startCountdown()
@@ -121,15 +174,6 @@ void startCountdown()
   start_time = end_time-(millis()-timer_);
   end_time_second = start_time/1000;
 
-}
-
-void setBrightness()
-{
-  //control the brightness of LED
-  ledcSetup(CHANNEL, FREQ, RESOLUTION); 
-  //attach the channel to the GPIO to be controlled
-  ledcAttachPin(PIN_DMD_nOE, CHANNEL);
-  ledcWrite(CHANNEL, txt_brightness);
 }
 
 void initVars()
@@ -162,9 +206,16 @@ void getBluetoothData()
       is_finished = true;
       is_timer = true;
     }
+    else if(running_text.indexOf("STNR_") >= 0)
+    {
+      SerialBT.println("OK.Full screen timer has been started");
+      start_time = running_text.substring(10,running_text.length()).toInt()*1000;
+      is_finished = true;
+      is_tiner = true;
+    }
     else if(running_text.indexOf("SCLK_") >= 0)
     {
-      SerialBT.println("OK.Timer has been adjusted");
+      SerialBT.println("OK.Time has been adjusted");
       running_text.substring(10,running_text.length()).toCharArray(clock_buffer, 13);
       Ds1302::DateTime dt;
       dt.year = parseDigits(clock_buffer, 2);
@@ -229,6 +280,26 @@ void showClockTimer(String uiTime, byte bColonOn)
   }
 }
 
+void showClockTiner(String uiTime, byte bColonOn)
+{
+  dmd.drawChar(1, 1, '0'+((uiTime.toInt()%1000000)/100000), GRAPHICS_NORMAL);   // thousands
+  dmd.drawChar(10, 1, '0'+((uiTime.toInt()%100000)/10000), GRAPHICS_NORMAL);   // hundreds
+  dmd.drawChar(23, 1, '0'+((uiTime.toInt()%10000)/1000), GRAPHICS_NORMAL);   // tens
+  dmd.drawChar(32, 1, '0'+ ((uiTime.toInt()%1000)/100), GRAPHICS_NORMAL);   // units
+  dmd.drawChar(45, 1, '0'+((uiTime.toInt()%100)/10), GRAPHICS_NORMAL);   // thousands
+  dmd.drawChar(54, 1, '0'+(uiTime.toInt()%10), GRAPHICS_NORMAL);   // hundreds
+  if(bColonOn)
+  {
+    dmd.drawChar(19, 0, ':', GRAPHICS_OR);   // clock colon overlay on
+    dmd.drawChar(41,  0, ':', GRAPHICS_OR);   // clock colon overlay on
+  }
+  else
+  {
+    dmd.drawChar(19, 0, ':', GRAPHICS_NOR);   // clock colon overlay on
+    dmd.drawChar(41,  0, ':', GRAPHICS_NOR);   // clock colon overlay on
+  }
+}
+
 void softwareReset()
 {
   while (SerialBT.available() > 0) {
@@ -239,7 +310,9 @@ void softwareReset()
   if(running_text.length() > 0 && running_text.indexOf("1234_") >= 0) { 
     if(running_text.indexOf("FRST") >= 0)
     {
-      ESP.restart();
+      SerialBT.println("OK.Reset has been successful");
+      is_timer = false;
+      is_tiner = false;
     }
   }
   else if(running_text.length() > 0 && running_text.indexOf("1234_") < 0)
@@ -249,28 +322,21 @@ void softwareReset()
   running_text = "";
 }
 
-void IRAM_ATTR triggerScan()
-{
-  dmd.scanDisplayBySPI();
-  setBrightness();
-}
-
-void initTimer()
-{
-  //return the clock speed of the CPU
-  uint8_t cpuClock = ESP.getCpuFreqMHz();  
-  //display timer
-  disp_timer = timerBegin(1, cpuClock, true);
-  timerAttachInterrupt(disp_timer, &triggerScan, true);
-  timerAlarmWrite(disp_timer, TIMER_MS, true);
-  // start an alarm 
-  timerAlarmEnable(disp_timer);
-}
-
 void initSerial()
 {
   Serial.begin(115200);
+  SerialBT.enableSSP();
+  SerialBT.onConfirmRequest(BTConfirmRequestCallback);
+  SerialBT.onAuthComplete(BTAuthCompleteCallback);
   SerialBT.begin(BLUETOOTH_NAME); //Bluetooth device name
+}
+
+void confirmBluetoothPending()
+{
+  if(confirmRequestPending)
+  {
+    SerialBT.confirmReply(true);
+  }
 }
 
 void initFont(int fnt)
@@ -283,7 +349,7 @@ void initFont(int fnt)
   else if(fnt == 1)
   {
     dmd.clearScreen(true);
-    dmd.selectFont(Arial_Black_16_ISO_8859_1);
+    dmd.selectFont(Arial_Black_16);
   }
 }
 
@@ -320,15 +386,32 @@ void timerMode()
   while(is_timer)
   {
     softwareReset();
-    initFont(1);
+    initFont(0);
     showClockTimer(secondsToHMS(end_time_second), true);
-    // dmd.drawString((64-(onair_text.length()*6))/2,  9, onair_txt, onair_text.length(), GRAPHICS_NORMAL);
+    dmd.drawString((64-(onair_text.length()*6))/2,  9, onair_txt, onair_text.length(), GRAPHICS_NORMAL);
     timer_ = millis();
     delay(100);
     startCountdown();
     if(end_time_second==0)
     {
       is_timer = false;
+    }
+  }
+}
+
+void tinerMode()
+{
+  while(is_tiner)
+  {
+    softwareReset();
+    initFont(1);
+    showClockTiner(secondsToHMS(end_time_second), true);
+    timer_ = millis();
+    delay(100);
+    startCountdown();
+    if(end_time_second==0)
+    {
+      is_tiner = false;
     }
   }
 }
@@ -344,7 +427,9 @@ void setup(void)
 
 void loop(void)
 {
+  confirmBluetoothPending();
   initVars();
   timerMode();
+  tinerMode();
   normalMode();
 }
