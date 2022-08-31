@@ -7,6 +7,9 @@
 #include <EEPROM.h>
 #include <Ds1302.h>
 #include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
 #endif
@@ -26,8 +29,8 @@
 //Global Vars
 String run_text, onair_text, running_text;
 unsigned int txt_brightness, txt_speed, timer_, end_time, end_time_second, start_time = 0;
-bool is_timer = false, is_tiner = false, is_finished = false, confirmRequestPending = true;;
-char onair_txt[24], clock_buffer[13];
+bool is_timer = false, is_tiner = false, is_finished = false, confirmRequestPending = true, clear_screen = false, is_full_clock = false;
+char onair_txt[24], clock_buffer[15];
 
 //Classic Bluetooth
 BluetoothSerial SerialBT;
@@ -198,25 +201,28 @@ void getBluetoothData()
       SerialBT.println("OK.Running text has been modified");
       EEPROM_put(10, running_text.substring(10,running_text.length()));
       is_finished = true;
+      clear_screen = true;
     }
     else if(running_text.indexOf("STMR_") >= 0)
     {
       SerialBT.println("OK.Timer has been started");
-      start_time = running_text.substring(10,running_text.length()).toInt()*1000;
+      start_time = (running_text.substring(10,running_text.length()).toInt()*1000)+1000;
       is_finished = true;
       is_timer = true;
+      clear_screen = true;
     }
     else if(running_text.indexOf("STNR_") >= 0)
     {
       SerialBT.println("OK.Full screen timer has been started");
-      start_time = running_text.substring(10,running_text.length()).toInt()*1000;
+      start_time = (running_text.substring(10,running_text.length()).toInt()*1000)+1000;
       is_finished = true;
       is_tiner = true;
+      clear_screen = true;
     }
     else if(running_text.indexOf("SCLK_") >= 0)
     {
       SerialBT.println("OK.Time has been adjusted");
-      running_text.substring(10,running_text.length()).toCharArray(clock_buffer, 13);
+      running_text.substring(10,running_text.length()).toCharArray(clock_buffer, 15);
       Ds1302::DateTime dt;
       dt.year = parseDigits(clock_buffer, 2);
       dt.month = parseDigits(clock_buffer + 2, 2);
@@ -225,28 +231,37 @@ void getBluetoothData()
       dt.hour = parseDigits(clock_buffer + 7, 2);
       dt.minute = parseDigits(clock_buffer + 9, 2);
       dt.second = parseDigits(clock_buffer + 11, 2);
-
       // set the date and time
       rtc.setDateTime(&dt);
       is_finished = true;
+      clear_screen = true;
     }
     else if(running_text.indexOf("SSPD_") >= 0)
     {
       SerialBT.println("OK.Speed has been changed");
       EEPROM_put(100, running_text.substring(10,running_text.length()));
       is_finished = true;
+      clear_screen = true;
     }
     else if(running_text.indexOf("SBRT_") >= 0)
     {
       SerialBT.println("OK.Brightness has been adjusted");
       EEPROM_put(110, running_text.substring(10,running_text.length()));
-      is_finished = true;
+      clear_screen = true;
     }
     else if(running_text.indexOf("STBR_") >= 0)
     {
       SerialBT.println("OK.Broadcast text has been changed");
       EEPROM_put(120, running_text.substring(10,running_text.length()));
       is_finished = true;
+      clear_screen = true;
+    }
+    else if(running_text.indexOf("FCLK") >= 0)
+    {
+      SerialBT.println("OK.Full clock mode has been chosen");
+      is_finished = true;
+      clear_screen = true;
+      is_full_clock = true;
     }
     else
     {
@@ -300,6 +315,18 @@ void showClockTiner(String uiTime, byte bColonOn)
   }
 }
 
+void initFont(int fnt)
+{
+  if(fnt == 0)
+  {
+    dmd.selectFont(SystemFont5x7);
+  }
+  else if(fnt == 1)
+  {
+    dmd.selectFont(Arial_Black_16);
+  }
+}
+
 void softwareReset()
 {
   while (SerialBT.available() > 0) {
@@ -313,6 +340,54 @@ void softwareReset()
       SerialBT.println("OK.Reset has been successful");
       is_timer = false;
       is_tiner = false;
+      is_full_clock = false;
+      start_time = 10;
+      clear_screen = true;
+    }
+    else if(running_text.indexOf("STMR_") >= 0)
+    {
+      SerialBT.println("OK.Timer has been started");
+      start_time = (running_text.substring(10,running_text.length()).toInt()*1000)+1000;
+      is_finished = true;
+      is_tiner = false;
+      is_timer = true;
+      is_full_clock = false;
+      clear_screen = true;
+    }
+    else if(running_text.indexOf("STNR_") >= 0)
+    {
+      SerialBT.println("OK.Full screen timer has been started");
+      start_time = (running_text.substring(10,running_text.length()).toInt()*1000)+1000;
+      is_finished = true;
+      is_timer = false;
+      is_tiner = true;
+      is_full_clock = false;
+      clear_screen = true;
+    }
+    else if(running_text.indexOf("STOO") >= 0)
+    {
+      SerialBT.println("OK.Timer has been set to 0");
+      start_time = 1000;
+      is_finished = true;
+      is_timer = true;
+      is_tiner = true;
+    }
+    else if(running_text.indexOf("STBR_") >= 0)
+    {
+      SerialBT.println("OK.Broadcast text has been changed");
+      EEPROM_put(120, running_text.substring(10,running_text.length()));
+      is_finished = true;
+      is_timer = true;
+      is_tiner = true;
+    }
+    else if(running_text.indexOf("FCLK") >= 0)
+    {
+      SerialBT.println("OK.Full clock mode has been chosen");
+      is_finished = true;
+      clear_screen = true;
+      is_full_clock = true;
+      is_tiner = false;
+      is_timer = false;
     }
   }
   else if(running_text.length() > 0 && running_text.indexOf("1234_") < 0)
@@ -339,26 +414,17 @@ void confirmBluetoothPending()
   }
 }
 
-void initFont(int fnt)
-{
-  if(fnt == 0)
-  {
-    dmd.clearScreen(true);
-    dmd.selectFont(SystemFont5x7);
-  }
-  else if(fnt == 1)
-  {
-    dmd.clearScreen(true);
-    dmd.selectFont(Arial_Black_16);
-  }
-}
-
 void normalMode()
 {
   int length = run_text.length() + 1;
   char display[length];
   run_text.toCharArray(display, length);
   initFont(0);
+  if(clear_screen == true)
+  {
+    dmd.clearScreen(true);
+    clear_screen = false;
+  }
   dmd.drawMarquee(display, length, 32*DISPLAYS_ACROSS, 9);
   long timerms = millis();
   is_finished = false;
@@ -369,15 +435,25 @@ void normalMode()
       // get the current time
       Ds1302::DateTime now;
       rtc.getDateTime(&now);
-
       static uint8_t last_second = 0;
       if (last_second != now.second)
       {
-          last_second = now.second;
-          showClockTimer(secondsToHMS((now.hour*3600)+(now.minute*60)+now.second), true);
+        initVars();
+        last_second = now.second;
+        showClockTimer(secondsToHMS((now.hour*3600)+(now.minute*60)+now.second), true);
       }
       timerms = millis();
     }
+  }
+  // get the current time
+  Ds1302::DateTime now;
+  rtc.getDateTime(&now);
+  static uint8_t last_second = 0;
+  if (last_second != now.second)
+  {
+    initVars();
+    last_second = now.second;
+    showClockTimer(secondsToHMS((now.hour*3600)+(now.minute*60)+now.second), true);
   }
 }
 
@@ -385,8 +461,10 @@ void timerMode()
 {
   while(is_timer)
   {
+    initVars();
     softwareReset();
     initFont(0);
+    dmd.clearScreen(true);
     showClockTimer(secondsToHMS(end_time_second), true);
     dmd.drawString((64-(onair_text.length()*6))/2,  9, onair_txt, onair_text.length(), GRAPHICS_NORMAL);
     timer_ = millis();
@@ -394,7 +472,12 @@ void timerMode()
     startCountdown();
     if(end_time_second==0)
     {
-      is_timer = false;
+      start_time = 0;
+      while(start_time == 0)
+      {
+        softwareReset();
+        showClockTimer(secondsToHMS(0), true);
+      }
     }
   }
 }
@@ -405,18 +488,42 @@ void tinerMode()
   {
     softwareReset();
     initFont(1);
+    dmd.clearScreen(true);
     showClockTiner(secondsToHMS(end_time_second), true);
     timer_ = millis();
     delay(100);
     startCountdown();
     if(end_time_second==0)
     {
-      is_tiner = false;
+      start_time = 0;
+      while(start_time == 0)
+      {
+        softwareReset();
+        showClockTiner(secondsToHMS(0), true);
+      }
     }
   }
 }
 
-/* Main Program */
+void fullClockMode()
+{
+  while(is_full_clock)
+  {
+    softwareReset();
+    dmd.clearScreen(true);
+    initFont(1);
+    Ds1302::DateTime now;
+    rtc.getDateTime(&now);
+    showClockTiner(secondsToHMS((now.hour*3600)+(now.minute*60)+now.second), true);
+    delay(500);
+  }
+}
+/* Line 1 - Main Program */
+/* Line 2 - Main Program */
+/* Line 3 - Main Program */
+/* Line 4 - Main Program */
+/* Line 5 - Main Program */
+/* Line 6 - Main Program */
 void setup(void)
 {
   initSerial();
@@ -431,5 +538,9 @@ void loop(void)
   initVars();
   timerMode();
   tinerMode();
-  normalMode();
+  fullClockMode();
+  if(is_timer == false && is_tiner == false && is_full_clock == false)
+  {
+    normalMode();
+  }
 }
